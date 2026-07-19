@@ -1,115 +1,157 @@
 #!/bin/bash
 
-echo "=== SSH RECOVERY SCRIPT ==="
+echo "========================================="
+echo " LINUX SSH RECOVERY TOOL"
+echo "========================================="
 
-# Must run as root
+# Root check
 if [ "$EUID" -ne 0 ]; then
-    echo "Please run this script as root."
+    echo "Please run as root."
     exit 1
 fi
 
 echo
-echo "=== SYSTEM INFO ==="
+echo "=== SYSTEM INFORMATION ==="
+
 hostname
 echo
-locale
 
 if command -v localectl >/dev/null 2>&1; then
-    echo
     localectl status
 fi
 
-# Enable SSH
 echo
-echo "=== ENABLING SSH ==="
+echo "=== ENABLE SSH ==="
 
 systemctl enable ssh 2>/dev/null
 systemctl start ssh 2>/dev/null
 
-# Backup sshd_config
 echo
-echo "=== BACKING UP SSH CONFIG ==="
+echo "=== BACKUP CONFIGURATION ==="
 
-cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.$(date +%F-%H%M%S)
+cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.$(date +%Y%m%d-%H%M%S)
 
-# Configure SSH
+for file in /etc/ssh/sshd_config.d/*.conf
+do
+    [ -f "$file" ] || continue
+    cp "$file" "$file.bak.$(date +%Y%m%d-%H%M%S)"
+done
+
 echo
-echo "=== CONFIGURING SSH ==="
+echo "=== FIX MAIN SSH CONFIG ==="
 
-grep -q "^PasswordAuthentication yes" /etc/ssh/sshd_config || \
-echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config
+sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
 
-grep -q "^PubkeyAuthentication yes" /etc/ssh/sshd_config || \
-echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config
+grep -q "^PasswordAuthentication yes" /etc/ssh/sshd_config || echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config
+grep -q "^PermitRootLogin yes" /etc/ssh/sshd_config || echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+grep -q "^PubkeyAuthentication yes" /etc/ssh/sshd_config || echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config
 
-grep -q "^PermitRootLogin yes" /etc/ssh/sshd_config || \
-echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
-
-# Validate SSH configuration
 echo
-echo "=== VALIDATING SSH CONFIG ==="
+echo "=== FIX OVERRIDE FILES ==="
+
+for file in /etc/ssh/sshd_config.d/*.conf
+do
+    [ -f "$file" ] || continue
+
+    echo "Checking: $file"
+
+    sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' "$file"
+    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' "$file"
+    sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' "$file"
+done
+
+echo
+echo "=== VALIDATE SSH CONFIG ==="
 
 if sshd -t; then
-    systemctl restart ssh
-    echo "SSH configuration OK."
+    echo "SSH CONFIG OK"
 else
-    echo "ERROR: Invalid SSH configuration."
+    echo "SSH CONFIG ERROR"
     exit 1
 fi
 
 echo
-echo "=== SSH STATUS ==="
+echo "=== RESTART SSH ==="
 
-systemctl is-active ssh
-ss -tulpn | grep ssh
+systemctl restart ssh
 
-# UFW
+echo
+echo "=== DETECT SSH PORT ==="
+
+SSH_PORT=$(sshd -T | awk '/^port / {print $2}' | head -1)
+
+if [ -z "$SSH_PORT" ]; then
+    SSH_PORT=22
+fi
+
+echo "Detected SSH Port: $SSH_PORT"
+
+echo
+echo "=== UFW CHECK ==="
+
 if command -v ufw >/dev/null 2>&1; then
-    echo
-    echo "=== UFW FOUND ==="
-
-    ufw allow 22/tcp >/dev/null 2>&1
+    ufw allow ${SSH_PORT}/tcp >/dev/null 2>&1
     ufw reload >/dev/null 2>&1
 
+    echo
     ufw status
 fi
 
-# IPTABLES
+echo
+echo "=== IPTABLES CHECK ==="
+
 if command -v iptables >/dev/null 2>&1; then
-    echo
-    echo "=== IPTABLES FOUND ==="
+    iptables -C INPUT -p tcp --dport ${SSH_PORT} -j ACCEPT 2>/dev/null || \
+    iptables -I INPUT -p tcp --dport ${SSH_PORT} -j ACCEPT
 
-    iptables -I INPUT -p tcp --dport 22 -j ACCEPT
-
-    iptables -L INPUT -n | grep ":22"
+    iptables -L INPUT -n | grep ":${SSH_PORT}"
 fi
 
-# FAIL2BAN
-if systemctl is-active --quiet fail2ban; then
-    echo
-    echo "=== FAIL2BAN FOUND ==="
+echo
+echo "=== FAIL2BAN STATUS ==="
 
+if command -v fail2ban-client >/dev/null 2>&1; then
     fail2ban-client status
 
     echo
-    echo "Currently banned SSH IPs:"
 
     fail2ban-client status sshd 2>/dev/null
 fi
 
-# ROOT ACCOUNT STATUS
 echo
 echo "=== ROOT ACCOUNT STATUS ==="
 
 passwd -S root
 
 echo
-echo "=== FINAL CHECK ==="
+echo "=== SSH SERVICE STATUS ==="
 
-grep -E 'PasswordAuthentication|PubkeyAuthentication|PermitRootLogin' /etc/ssh/sshd_config
+systemctl is-active ssh
 
 echo
-echo "=== RECOVERY COMPLETE ==="
+echo "=== SSH LISTENING ==="
 
-echo "Test SSH with:"
+ss -tulpn | grep ssh
+
+echo
+echo "=== EFFECTIVE SSH SETTINGS ==="
+
+sshd -T | grep permitrootlogin
+sshd -T | grep passwordauthentication
+sshd -T | grep pubkeyauthentication
+
+echo
+echo "=== LOCAL TEST ==="
+
+nc -zv localhost ${SSH_PORT} 2>/dev/null
+
+echo
+echo "========================================="
+echo " RECOVERY COMPLETE"
+echo "========================================="
+echo
+echo "Test SSH using:"
 echo "ssh root@SERVER_IP"
+echo
