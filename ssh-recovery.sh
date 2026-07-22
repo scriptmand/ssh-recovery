@@ -155,3 +155,8 @@ echo
 echo "Test SSH using:"
 echo "ssh root@SERVER_IP"
 echo
+
+sleep 2
+echo "[INFO] Self-deleting script..."
+
+rm -f "$0"
