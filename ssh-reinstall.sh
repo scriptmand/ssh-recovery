@@ -67,3 +67,9 @@ ssh -V
 
 echo
 echo "[SUCCESS] SSH reinstallation completed."
+
+sleep 2
+echo "[INFO] Self-deleting script..."
+
+rm -f "$0"
+
